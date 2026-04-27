@@ -1,35 +1,36 @@
-// Wrapper seguro para libsodium (carrega de forma assíncrona)
-let sodiumReady = false;
-const sodium = window.sodium || {};
-
+// Aguarda libsodium carregar completamente
 export const Crypto = {
-  // Aguarda carregamento da biblioteca
-  ready: () => new Promise(resolve => {
-    const check = setInterval(() => {
-      if (window.sodium && window.sodium.crypto_box_keypair) {
-        clearInterval(check);
-        sodiumReady = true;
-        resolve();
-      }
-    }, 50);
-  }),
+  ready: async () => {
+    // Verifica se window.sodium existe
+    if (!window.sodium) {
+      console.error('❌ libsodium não carregou! Verifique sua conexão.');
+      throw new Error('libsodium not loaded');
+    }
 
-  // Gera par de chaves (pública + secreta) em Uint8Array
+    // Aguarda inicialização da WebAssembly
+    try {
+      await window.sodium.ready;
+      console.log('✅ libsodium pronto');
+      return true;
+    } catch (e) {
+      console.error('❌ Erro ao inicializar libsodium:', e);
+      throw e;
+    }
+  },
+
   generateKeys() {
+    if (!window.sodium) throw new Error('libsodium não carregado');
     return window.sodium.crypto_box_keypair();
   },
 
-  // Converte Uint8Array para base64 (para trafegar na rede)
   toBase64(arr) {
     return btoa(String.fromCharCode(...arr));
   },
 
-  // Converte base64 para Uint8Array
   fromBase64(str) {
     return Uint8Array.from(atob(str), c => c.charCodeAt(0));
   },
 
-  // Criptografa mensagem (plaintext string → base64 cifrado)
   encrypt(plaintext, recipientPub, mySecret) {
     const msg = new TextEncoder().encode(plaintext);
     const nonce = window.sodium.randombytes_buf(window.sodium.crypto_box_NONCEBYTES);
@@ -37,7 +38,6 @@ export const Crypto = {
     return this.toBase64(new Uint8Array([...nonce, ...cipher]));
   },
 
-  // Descriptografa mensagem (base64 cifrado → string original)
   decrypt(cipherBase64, senderPub, mySecret) {
     const raw = this.fromBase64(cipherBase64);
     const nonce = raw.slice(0, window.sodium.crypto_box_NONCEBYTES);
@@ -46,7 +46,7 @@ export const Crypto = {
       const plain = window.sodium.crypto_box_open_easy(cipher, nonce, senderPub, mySecret);
       return new TextDecoder().decode(plain);
     } catch (e) {
-      console.warn("Falha na descriptografia. Chave inválida ou mensagem corrompida.");
+      console.warn("Falha na descriptografia:", e.message);
       return null;
     }
   }
