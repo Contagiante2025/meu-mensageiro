@@ -7,8 +7,6 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
-  <!-- libsodium CARREGA PRIMEIRO -->
-  <script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.13/dist/modules/libsodium-wrappers.js"></script>
 </head>
 <body>
   <div class="app">
@@ -16,7 +14,7 @@
       <h2>🔐 Entrar</h2>
       <input type="text" id="username" placeholder="Nome anônimo" maxlength="15">
       <button id="connect-btn">Conectar</button>
-      <div id="loading" style="display:none; margin-top:10px; color:#94a3b8; font-size:0.9rem;">⏳ Carregando criptografia...</div>
+      <div id="loading" style="display:none; margin-top:10px; color:#94a3b8; font-size:0.9rem;">⏳ Gerando chaves criptográficas...</div>
     </div>
     <div id="chat-screen" class="hidden">
       <div id="chat-log"></div>
@@ -29,7 +27,6 @@
     </div>
   </div>
 
-  <!-- Scripts em MÓDULO carregam DEPOIS do libsodium -->
   <script type="module" src="/crypto.js"></script>
   <script type="module" src="/localdb.js"></script>
   <script type="module" src="/app.js"></script>
