@@ -1,4 +1,4 @@
-// app.js - Mensageiro PWA Completo (E2EE + Push Notifications)
+// app.js - Mensageiro PWA Estável (E2EE + Push Seguros)
 import { Crypto } from '/crypto.js';
 import { LocalDB } from '/localdb.js';
 
@@ -51,21 +51,34 @@ async function init() {
     document.getElementById('loading').style.display = 'none';
     console.log('✅ App inicializado com Web Crypto API');
     
-    // Configura botões
-    document.getElementById('connect-btn').onclick = connect;
-    document.getElementById('send-btn').onclick = sendMessage;
-    document.getElementById('message-input').onkeydown = e => {
-      if (e.key === 'Enter') sendMessage();
-    };
-    document.getElementById('clear-btn').onclick = async () => {
+    // ========================================================================
+    // EVENT LISTENERS COM PROTEÇÃO (Verifica se o botão existe)
+    // ========================================================================
+    const btnConnect = document.getElementById('connect-btn');
+    if (btnConnect) btnConnect.onclick = connect;
+
+    const btnSend = document.getElementById('send-btn');
+    if (btnSend) btnSend.onclick = sendMessage;
+
+    const inputMsg = document.getElementById('message-input');
+    if (inputMsg) inputMsg.onkeydown = e => { if (e.key === 'Enter') sendMessage(); };
+
+    const btnClear = document.getElementById('clear-btn');
+    if (btnClear) btnClear.onclick = async () => {
       if (confirm('Apagar todo o histórico local?')) {
         await LocalDB.clear();
         document.getElementById('chat-log').innerHTML = '';
         alert('✅ Histórico apagado!');
       }
     };
-    // Botão de Notificações
-    document.getElementById('enable-push-btn').onclick = requestPushPermission;
+
+    // Botão de Notificações (Opcional - se existir no HTML)
+    const btnPush = document.getElementById('enable-push-btn');
+    if (btnPush) {
+      btnPush.onclick = requestPushPermission;
+    } else {
+      console.log('ℹ️ Botão de Push não encontrado no HTML (Push desativado).');
+    }
 
   } catch (error) {
     console.error('❌ Erro na inicialização:', error);
@@ -78,7 +91,9 @@ async function init() {
 // CONEXÃO WEBSOCKET
 // ============================================================================
 async function connect() {
-  const name = document.getElementById('username').value.trim().toLowerCase().replace(/\s+/g, '_');
+  const nameInput = document.getElementById('username');
+  const name = nameInput ? nameInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
+  
   if (!name) return alert('Digite um nome!');
   if (!myKeys?.publicKey) return alert('❌ Chaves não geradas. Recarregue.');
 
@@ -98,8 +113,12 @@ async function connect() {
       publicKey: pubB64
     }));
 
-    document.getElementById('login-screen').classList.add('hidden');
-    document.getElementById('chat-screen').classList.remove('hidden');
+    // Esconde login, mostra chat
+    const loginScreen = document.getElementById('login-screen');
+    const chatScreen = document.getElementById('chat-screen');
+    if(loginScreen) loginScreen.classList.add('hidden');
+    if(chatScreen) chatScreen.classList.remove('hidden');
+    
     loadHistory();
 
     // Se o usuário já deu permissão para notificações antes, registra o Push
@@ -168,15 +187,15 @@ async function connect() {
 }
 
 // ============================================================================
-// 🔔 NOTIFICAÇÕES PUSH
+// 🔔 NOTIFICAÇÕES PUSH (Opcional)
 // ============================================================================
 async function requestPushPermission() {
+  if (!('Notification' in window)) return alert('Notificações não suportadas.');
   const result = await Notification.requestPermission();
   if (result === 'granted') {
-    alert('✅ Permissão concedida! Configurando notificações...');
     await registerPush();
   } else {
-    alert('⚠️ Permissão negada. Você não receberá alertas.');
+    alert('⚠️ Permissão negada.');
   }
 }
 
@@ -186,38 +205,33 @@ async function registerPush() {
       console.warn('Push não suportado'); return;
     }
 
-    // 1. Garante que o SW está pronto
     const reg = await navigator.serviceWorker.ready;
-
-    // 2. Busca a chave pública VAPID no Backend
     const backendHttpUrl = 'https://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL HTTP
-    console.log('📡 Buscando chave VAPID...');
+    
     const res = await fetch(`${backendHttpUrl}/api/vapid-public-key`);
+    if (!res.ok) throw new Error('Falha ao buscar chave VAPID');
+    
     const { publicKey } = await res.json();
-
-    // 3. Subscrição
     const applicationServerKey = urlBase64ToUint8Array(publicKey);
+    
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey
     });
 
-    // 4. Envia a subscrição para o backend
     await fetch(`${backendHttpUrl}/api/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: myId, subscription })
     });
 
-    console.log('🎉 Push ativado com sucesso!');
-    if(Notification.permission === 'granted') {
-      // Feedback visual apenas se não veio do requestPermission (que já dá alert)
-      const btn = document.getElementById('enable-push-btn');
-      if(btn) { btn.textContent = '✅ Notificações Ativas'; btn.disabled = true; }
-    }
+    console.log('🎉 Push ativado!');
+    const btn = document.getElementById('enable-push-btn');
+    if(btn) { btn.textContent = '✅ Ativo'; btn.disabled = true; }
 
   } catch (err) {
     console.error('❌ Erro no Push:', err);
+    // Não alertamos o usuário aqui para não atrapalhar o chat
   }
 }
 
@@ -252,15 +266,23 @@ async function sendPendingMessage() {
 
   addMessage('Você', content, 'sent');
   await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
-  document.getElementById('message-input').value = '';
+  const input = document.getElementById('message-input');
+  if(input) input.value = '';
 }
 
 async function sendMessage() {
-  const to = document.getElementById('target-user').value.trim().toLowerCase().replace(/\s+/g, '_');
-  const content = document.getElementById('message-input').value.trim();
+  console.log('🔍 Tentando enviar mensagem...');
+  const toInput = document.getElementById('target-user');
+  const contentInput = document.getElementById('message-input');
+  
+  const to = toInput ? toInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
+  const content = contentInput ? contentInput.value.trim() : '';
   
   if (!to || !content) return alert('Preencha destinatário e mensagem!');
-  if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Sem conexão.');
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error('❌ WebSocket não está aberto');
+      return alert('Sem conexão. Recarregue.');
+  }
 
   if (!contactsKeys.has(to)) {
     pendingMessage = { to, content };
@@ -268,12 +290,15 @@ async function sendMessage() {
     ws.send(JSON.stringify({ type: 'request_key', to }));
 
     const btn = document.getElementById('send-btn');
-    btn.textContent = '⏳ Aguardando...';
-    btn.disabled = true;
-    setTimeout(() => { btn.textContent = 'Enviar'; btn.disabled = false; }, 3000);
+    if(btn) {
+        btn.textContent = '⏳ Aguardando...';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = 'Enviar'; btn.disabled = false; }, 3000);
+    }
     return;
   }
 
+  console.log(' Criptografando e enviando...');
   const contact = contactsKeys.get(to);
   const encrypted = await Crypto.encrypt(content, contact.aesKey);
   const myPubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
@@ -282,11 +307,12 @@ async function sendMessage() {
   
   addMessage('Você', content, 'sent');
   await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
-  document.getElementById('message-input').value = '';
+  if(contentInput) contentInput.value = '';
 }
 
 function addMessage(from, text, type) {
   const log = document.getElementById('chat-log');
+  if (!log) return;
   const div = document.createElement('div');
   div.className = `msg ${type}`;
   div.innerHTML = `<div class="meta">${type === 'sent' ? '→' : '←'} ${from} • ${new Date().toLocaleTimeString()}</div>${text}`;
