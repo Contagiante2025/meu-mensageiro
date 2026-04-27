@@ -1,19 +1,23 @@
-// app.js
+// app.js - Mensageiro PWA com E2EE via Web Crypto API
 import { Crypto } from '/crypto.js';
 import { LocalDB } from '/localdb.js';
 
 let ws = null;
 let myId = null;
-let myKeys = null; // { publicKey, privateKey }
-let contactsKeys = new Map(); // userId → { publicKey, aesKey }
+let myKeys = null; // { publicKey: CryptoKey, privateKey: CryptoKey }
+let contactsKeys = new Map(); // userId → { publicKey: CryptoKey, aesKey: CryptoKey }
 
+// ============================================================================
+// INICIALIZAÇÃO
+// ============================================================================
 async function init() {
   try {
     document.getElementById('loading').style.display = 'block';
     
+    // Inicia IndexedDB para histórico local
     await LocalDB.init();
 
-    // Carrega ou gera chaves
+    // Carrega ou gera par de chaves ECDH
     const stored = localStorage.getItem('msg_keys');
     if (stored) {
       const parsed = JSON.parse(stored);
@@ -25,25 +29,28 @@ async function init() {
     } else {
       myKeys = await Crypto.generateKeys();
       const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
-      const privB64 = await Crypto.exportPrivateKey(myKeys.privateKey);
-      localStorage.setItem('msg_keys', JSON.stringify({ publicKey: pubB64, privateKey: privB64 }));
-      console.log('✅ Novas chaves geradas');
+      const privJson = await Crypto.exportPrivateKey(myKeys.privateKey); // JWK string
+      localStorage.setItem('msg_keys', JSON.stringify({ 
+        publicKey: pubB64, 
+        privateKey: privJson 
+      }));
+      console.log('✅ Novas chaves geradas e salvas');
     }
 
-    // Carrega contatos
+    // Carrega chaves públicas dos contatos
     const storedContacts = localStorage.getItem('msg_contacts');
     if (storedContacts) {
       const parsed = JSON.parse(storedContacts);
       for (const [userId, pubB64] of Object.entries(parsed)) {
         contactsKeys.set(userId, {
           publicKey: await Crypto.importPublicKey(pubB64),
-          aesKey: null // derivado depois
+          aesKey: null // será derivado na primeira troca
         });
       }
     }
 
     document.getElementById('loading').style.display = 'none';
-    console.log('✅ App inicializado com Web Crypto API');
+    console.log('✅ App inicializado com Web Crypto API (ECDH + AES-GCM)');
     
   } catch (error) {
     console.error('❌ Erro na inicialização:', error);
@@ -52,6 +59,9 @@ async function init() {
   }
 }
 
+// ============================================================================
+// CONEXÃO WEBSOCKET
+// ============================================================================
 async function connect() {
   const name = document.getElementById('username').value.trim().toLowerCase().replace(/\s+/g, '_');
   if (!name) return alert('Digite um nome!');
@@ -62,22 +72,28 @@ async function connect() {
   }
   
   myId = name;
-  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL DO RENDER
+  // ⚠️ SUBSTITUA PELA SUA URL DO RENDER
+  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com';
   
+  console.log('🔌 Conectando a:', BACKEND_URL);
   ws = new WebSocket(BACKEND_URL);
 
   ws.onopen = async () => {
     console.log('✅ WebSocket conectado');
     const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
     
+    // Registra usuário no backend com chave pública
     ws.send(JSON.stringify({
       type: 'register',
       userId: myId,
       publicKey: pubB64
     }));
     
+    // Troca de tela
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('chat-screen').classList.remove('hidden');
+    
+    // Carrega histórico local
     loadHistory();
   };
 
@@ -85,8 +101,9 @@ async function connect() {
     try {
       const data = JSON.parse(e.data);
       
+      // 🔑 Troca de chaves públicas (handshake E2EE)
       if (data.type === 'exchange_key') {
-        console.log('🔑 Chave recebida de:', data.from);
+        console.log('🔑 Chave pública recebida de:', data.from);
         const theirPub = await Crypto.importPublicKey(data.publicKey);
         const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
         contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
@@ -94,13 +111,19 @@ async function connect() {
         return;
       }
       
+      // 📤 Solicitação de chave pública
       if (data.type === 'request_key') {
-        console.log('📤 Enviando chave para:', data.from);
+        console.log('📤 Enviando chave pública para:', data.from);
         const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
-        ws.send(JSON.stringify({ type: 'exchange_key', to: data.from, publicKey: pubB64 }));
+        ws.send(JSON.stringify({ 
+          type: 'exchange_key', 
+          to: data.from, 
+          publicKey: pubB64 
+        }));
         return;
       }
       
+      // 📨 Mensagem criptografada recebida
       if (data.type === 'message') {
         console.log('📨 Mensagem recebida de:', data.from);
         
@@ -125,10 +148,11 @@ async function connect() {
             timestamp: data.timestamp 
           });
         } else {
-          console.warn('⚠️ Não foi possível descriptografar');
+          console.warn('⚠️ Falha ao descriptografar mensagem');
         }
       }
       
+      // ⚠️ Erro do backend
       if (data.type === 'error') {
         alert('⚠️ ' + data.content);
       }
@@ -143,25 +167,29 @@ async function connect() {
   };
   
   ws.onclose = () => {
-    console.log('🔌 Conexão fechada');
-    alert('Conexão encerrada. Recarregue a página.');
+    console.log('🔌 Conexão WebSocket fechada');
+    alert('Conexão encerrada. Recarregue a página para reconectar.');
   };
 }
 
+// ============================================================================
+// ENVIO DE MENSAGEM
+// ============================================================================
 async function sendMessage() {
   const to = document.getElementById('target-user').value.trim().toLowerCase().replace(/\s+/g, '_');
   const content = document.getElementById('message-input').value.trim();
   
   if (!to || !content) return alert('Preencha destinatário e mensagem!');
-  if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Sem conexão. Recarregue.');
+  if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Sem conexão. Recarregue a página.');
   
-  // Solicita chave se não tiver
+  // Se não temos a chave do contato, solicita
   if (!contactsKeys.has(to)) {
-    console.log('🔑 Solicitando chave para:', to);
+    console.log('🔑 Solicitando chave pública para:', to);
     ws.send(JSON.stringify({ type: 'request_key', to }));
     return alert(`Solicitando chave para ${to}... Aguarde 2 segundos e tente enviar novamente.`);
   }
 
+  // Criptografa e envia
   const contact = contactsKeys.get(to);
   const encrypted = await Crypto.encrypt(content, contact.aesKey);
   
@@ -175,6 +203,7 @@ async function sendMessage() {
     senderPub: myPubB64 
   }));
   
+  // Exibe localmente e salva no histórico
   addMessage('Você', content, 'sent');
   await LocalDB.save({ 
     id: Date.now() + '_s', 
@@ -187,20 +216,31 @@ async function sendMessage() {
   document.getElementById('message-input').value = '';
 }
 
-// Helpers de UI
+// ============================================================================
+// HELPERS DE UI
+// ============================================================================
 function addMessage(from, text, type) {
   const log = document.getElementById('chat-log');
   const div = document.createElement('div');
   div.className = `msg ${type}`;
-  div.innerHTML = `<div class="meta">${type === 'sent' ? '→' : '←'} ${from} • ${new Date().toLocaleTimeString()}</div>${text}`;
+  div.innerHTML = `
+    <div class="meta">
+      ${type === 'sent' ? '→' : '←'} ${from} • ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+    </div>
+    ${text}
+  `;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
 
 async function loadHistory() {
   const history = await LocalDB.load(myId);
-  console.log('📚 Histórico:', history.length, 'mensagens');
-  history.forEach(m => addMessage(m.from === myId ? 'Você' : m.from, m.content, m.from === myId ? 'sent' : 'received'));
+  console.log('📚 Histórico local carregado:', history.length, 'mensagens');
+  history.forEach(m => {
+    const sender = m.from === myId ? 'Você' : m.from;
+    const type = m.from === myId ? 'sent' : 'received';
+    addMessage(sender, m.content, type);
+  });
 }
 
 async function saveContactsKeys() {
@@ -209,19 +249,26 @@ async function saveContactsKeys() {
     obj[userId] = await Crypto.exportPublicKey(data.publicKey);
   }
   localStorage.setItem('msg_contacts', JSON.stringify(obj));
+  console.log('💾 Chaves de contatos salvas');
 }
 
-// Event listeners
+// ============================================================================
+// EVENT LISTENERS
+// ============================================================================
 document.getElementById('connect-btn').onclick = connect;
 document.getElementById('send-btn').onclick = sendMessage;
-document.getElementById('message-input').onkeydown = e => e.key === 'Enter' && sendMessage();
+document.getElementById('message-input').onkeydown = e => {
+  if (e.key === 'Enter') sendMessage();
+};
 document.getElementById('clear-btn').onclick = async () => {
-  if (confirm('Apagar todo o histórico local?')) {
+  if (confirm('Apagar todo o histórico local? Esta ação não pode ser desfeita.')) {
     await LocalDB.clear();
     document.getElementById('chat-log').innerHTML = '';
-    alert('✅ Histórico apagado!');
+    alert('✅ Histórico apagado com sucesso!');
   }
 };
 
-// Inicializa
+// ============================================================================
+// INICIA O APP
+// ============================================================================
 init();
