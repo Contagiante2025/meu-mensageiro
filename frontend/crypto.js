@@ -1,52 +1,76 @@
-// Aguarda libsodium carregar completamente
+// Criptografia usando Web Crypto API nativa (sem dependências externas)
+// Algoritmo: ECDH (troca de chaves) + AES-GCM (criptografia de mensagem)
+
 export const Crypto = {
-  ready: async () => {
-    // Verifica se window.sodium existe
-    if (!window.sodium) {
-      console.error('❌ libsodium não carregou! Verifique sua conexão.');
-      throw new Error('libsodium not loaded');
-    }
+  // Gera par de chaves ECDH (P-256)
+  generateKeys: async () => {
+    return await window.crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      ['deriveKey']
+    );
+  },
 
-    // Aguarda inicialização da WebAssembly
+  // Exporta chave pública para base64 (para enviar na rede)
+  exportPublicKey: async (publicKey) => {
+    const raw = await window.crypto.subtle.exportKey('raw', publicKey);
+    return btoa(String.fromCharCode(...new Uint8Array(raw)));
+  },
+
+  // Importa chave pública de base64
+  importPublicKey: async (base64) => {
+    const raw = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    return await window.crypto.subtle.importKey(
+      'raw',
+      raw,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      []
+    );
+  },
+
+  // Deriva chave AES a partir do segredo ECDH
+  deriveAESKey: async (theirPublic, myPrivate) => {
+    const shared = await window.crypto.subtle.deriveKey(
+      { name: 'ECDH', public: theirPublic },
+      myPrivate,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+    return shared;
+  },
+
+  // Criptografa mensagem (string → base64 cifrado)
+  encrypt: async (plaintext, aesKey) => {
+    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(plaintext);
+    const cipher = await window.crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: iv },
+      aesKey,
+      encoded
+    );
+    // Retorna: iv (12 bytes) + ciphertext
+    const result = new Uint8Array(iv.length + cipher.byteLength);
+    result.set(iv, 0);
+    result.set(new Uint8Array(cipher), iv.length);
+    return btoa(String.fromCharCode(...result));
+  },
+
+  // Descriptografa mensagem (base64 cifrado → string)
+  decrypt: async (cipherBase64, aesKey) => {
     try {
-      await window.sodium.ready;
-      console.log('✅ libsodium pronto');
-      return true;
-    } catch (e) {
-      console.error('❌ Erro ao inicializar libsodium:', e);
-      throw e;
-    }
-  },
-
-  generateKeys() {
-    if (!window.sodium) throw new Error('libsodium não carregado');
-    return window.sodium.crypto_box_keypair();
-  },
-
-  toBase64(arr) {
-    return btoa(String.fromCharCode(...arr));
-  },
-
-  fromBase64(str) {
-    return Uint8Array.from(atob(str), c => c.charCodeAt(0));
-  },
-
-  encrypt(plaintext, recipientPub, mySecret) {
-    const msg = new TextEncoder().encode(plaintext);
-    const nonce = window.sodium.randombytes_buf(window.sodium.crypto_box_NONCEBYTES);
-    const cipher = window.sodium.crypto_box_easy(msg, nonce, recipientPub, mySecret);
-    return this.toBase64(new Uint8Array([...nonce, ...cipher]));
-  },
-
-  decrypt(cipherBase64, senderPub, mySecret) {
-    const raw = this.fromBase64(cipherBase64);
-    const nonce = raw.slice(0, window.sodium.crypto_box_NONCEBYTES);
-    const cipher = raw.slice(window.sodium.crypto_box_NONCEBYTES);
-    try {
-      const plain = window.sodium.crypto_box_open_easy(cipher, nonce, senderPub, mySecret);
+      const raw = Uint8Array.from(atob(cipherBase64), c => c.charCodeAt(0));
+      const iv = raw.slice(0, 12);
+      const cipher = raw.slice(12);
+      const plain = await window.crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv },
+        aesKey,
+        cipher
+      );
       return new TextDecoder().decode(plain);
     } catch (e) {
-      console.warn("Falha na descriptografia:", e.message);
+      console.warn('Falha na descriptografia:', e.message);
       return null;
     }
   }
