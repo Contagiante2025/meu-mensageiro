@@ -16,6 +16,7 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(data);
 
+      // 1. Registrar usuário
       if (msg.type === 'register') {
         userId = msg.userId;
         clients.set(userId, { ws, publicKey: msg.publicKey || null });
@@ -23,20 +24,33 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // Roteamento para mensagens e troca de chaves
+      // 2. Roteamento de mensagens e chaves
       if (msg.type === 'message' || msg.type === 'exchange_key' || msg.type === 'request_key') {
         const target = clients.get(msg.to);
+        
         if (target && target.ws.readyState === 1) {
+          
+          // Se for mensagem, anexamos a chave pública do remetente
           if (msg.type === 'message') {
             msg.senderPub = clients.get(userId)?.publicKey || 'unknown';
           }
+
+          // CORREÇÃO CRÍTICA: Se for pedido de chave, dizemos QUEM está pedindo
+          if (msg.type === 'request_key') {
+            msg.from = userId; // O servidor identifica o remetente
+          }
+
           target.ws.send(JSON.stringify(msg));
         } else if (msg.type === 'message') {
-          ws.send(JSON.stringify({ type: 'error', content: 'Destinatário offline ou não existe.' }));
+          // Usuário alvo offline
+          ws.send(JSON.stringify({ 
+            type: 'error', 
+            content: 'Usuário offline ou não existe. Peça para ele entrar no chat.' 
+          }));
         }
       }
     } catch (e) {
-      console.error('Erro de roteamento:', e.message);
+      console.error('Erro:', e.message);
     }
   });
 
