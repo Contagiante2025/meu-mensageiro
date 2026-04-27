@@ -28,7 +28,24 @@ export const Crypto = {
       []
     );
   },
+  // Exporta chave privada para base64 (para salvar localmente)
+  exportPrivateKey: async (privateKey) => {
+    const raw = await window.crypto.subtle.exportKey('raw', privateKey);
+    return btoa(String.fromCharCode(...new Uint8Array(raw)));
+  },
 
+  // Importa chave privada de base64
+  importPrivateKey: async (base64) => {
+    const raw = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+    return await window.crypto.subtle.importKey(
+      'raw',
+      raw,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      true,
+      ['deriveKey']
+    );
+  },
+  
   // Deriva chave AES a partir do segredo ECDH
   deriveAESKey: async (theirPublic, myPrivate) => {
     const shared = await window.crypto.subtle.deriveKey(
