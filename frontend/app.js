@@ -1,22 +1,18 @@
-// app.js - Mensageiro PWA Estável (E2EE + Push Seguros)
+// app.js - Mensageiro PWA Estável (Correção aesKey)
 import { Crypto } from '/crypto.js';
 import { LocalDB } from '/localdb.js';
 
 let ws = null;
 let myId = null;
-let myKeys = null; // { publicKey, privateKey }
-let contactsKeys = new Map(); // userId → { publicKey, aesKey }
-let pendingMessage = null; // Guarda mensagem enquanto aguarda chave
+let myKeys = null;
+let contactsKeys = new Map();
+let pendingMessage = null;
 
-// ============================================================================
-// INICIALIZAÇÃO
-// ============================================================================
 async function init() {
   try {
     document.getElementById('loading').style.display = 'block';
     await LocalDB.init();
 
-    // Carrega ou gera par de chaves ECDH
     const stored = localStorage.getItem('msg_keys');
     if (stored) {
       const parsed = JSON.parse(stored);
@@ -28,126 +24,96 @@ async function init() {
     } else {
       myKeys = await Crypto.generateKeys();
       const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
-      const privJson = await Crypto.exportPrivateKey(myKeys.privateKey); // Formato JWK
-      localStorage.setItem('msg_keys', JSON.stringify({
-        publicKey: pubB64,
-        privateKey: privJson
-      }));
-      console.log('✅ Novas chaves geradas e salvas');
+      const privJson = await Crypto.exportPrivateKey(myKeys.privateKey);
+      localStorage.setItem('msg_keys', JSON.stringify({ publicKey: pubB64, privateKey: privJson }));
+      console.log('✅ Novas chaves geradas');
     }
 
-    // Carrega chaves públicas dos contatos
     const storedContacts = localStorage.getItem('msg_contacts');
     if (storedContacts) {
       const parsed = JSON.parse(storedContacts);
       for (const [userId, pubB64] of Object.entries(parsed)) {
         contactsKeys.set(userId, {
           publicKey: await Crypto.importPublicKey(pubB64),
-          aesKey: null // Será derivada na primeira troca
+          aesKey: null // Será derivada depois
         });
       }
     }
 
     document.getElementById('loading').style.display = 'none';
-    console.log('✅ App inicializado com Web Crypto API');
+    console.log('✅ App inicializado');
     
-    // ========================================================================
-    // EVENT LISTENERS COM PROTEÇÃO (Verifica se o botão existe)
-    // ========================================================================
+    // Event listeners com proteção
     const btnConnect = document.getElementById('connect-btn');
     if (btnConnect) btnConnect.onclick = connect;
-
     const btnSend = document.getElementById('send-btn');
     if (btnSend) btnSend.onclick = sendMessage;
-
     const inputMsg = document.getElementById('message-input');
     if (inputMsg) inputMsg.onkeydown = e => { if (e.key === 'Enter') sendMessage(); };
-
     const btnClear = document.getElementById('clear-btn');
     if (btnClear) btnClear.onclick = async () => {
-      if (confirm('Apagar todo o histórico local?')) {
-        await LocalDB.clear();
-        document.getElementById('chat-log').innerHTML = '';
-        alert('✅ Histórico apagado!');
-      }
+      if (confirm('Apagar histórico?')) { await LocalDB.clear(); document.getElementById('chat-log').innerHTML = ''; }
     };
-
-    // Botão de Notificações (Opcional - se existir no HTML)
     const btnPush = document.getElementById('enable-push-btn');
-    if (btnPush) {
-      btnPush.onclick = requestPushPermission;
-    } else {
-      console.log('ℹ️ Botão de Push não encontrado no HTML (Push desativado).');
-    }
+    if (btnPush) btnPush.onclick = requestPushPermission;
 
   } catch (error) {
-    console.error('❌ Erro na inicialização:', error);
-    document.getElementById('loading').innerHTML = 
-      `❌ Erro: ${error.message}<br><small>Use Chrome 90+, Firefox 88+ ou Safari 15+</small>`;
+    console.error('❌ Erro init:', error);
   }
 }
 
-// ============================================================================
-// CONEXÃO WEBSOCKET
-// ============================================================================
 async function connect() {
   const nameInput = document.getElementById('username');
   const name = nameInput ? nameInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
-  
   if (!name) return alert('Digite um nome!');
-  if (!myKeys?.publicKey) return alert('❌ Chaves não geradas. Recarregue.');
+  if (!myKeys?.publicKey) return alert('❌ Chaves inválidas.');
 
   myId = name;
-  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL DO RENDER
-  
+  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com';
   console.log('🔌 Conectando a:', BACKEND_URL);
+  
   ws = new WebSocket(BACKEND_URL);
 
   ws.onopen = async () => {
     console.log('✅ WebSocket conectado');
     const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
-    
-    ws.send(JSON.stringify({
-      type: 'register',
-      userId: myId,
-      publicKey: pubB64
-    }));
+    ws.send(JSON.stringify({ type: 'register', userId: myId, publicKey: pubB64 }));
 
-    // Esconde login, mostra chat
-    const loginScreen = document.getElementById('login-screen');
-    const chatScreen = document.getElementById('chat-screen');
-    if(loginScreen) loginScreen.classList.add('hidden');
-    if(chatScreen) chatScreen.classList.remove('hidden');
+    const login = document.getElementById('login-screen');
+    const chat = document.getElementById('chat-screen');
+    if(login) login.classList.add('hidden');
+    if(chat) chat.classList.remove('hidden');
     
     loadHistory();
-
-    // Se o usuário já deu permissão para notificações antes, registra o Push
-    if (Notification.permission === 'granted') {
-      registerPush();
-    }
+    if (Notification.permission === 'granted') registerPush();
   };
 
   ws.onmessage = async (e) => {
     try {
       const data = JSON.parse(e.data);
 
-      // 🔑 Troca de chaves
       if (data.type === 'exchange_key') {
         console.log('🔑 Chave recebida de:', data.from);
         const theirPub = await Crypto.importPublicKey(data.publicKey);
         const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
-        contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
+        
+        // 🔧 Atualiza o contato existente com a aesKey derivada
+        const existing = contactsKeys.get(data.from);
+        if (existing) {
+          existing.aesKey = aesKey; // Atualiza in-place
+          contactsKeys.set(data.from, existing);
+        } else {
+          contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
+        }
         saveContactsKeys();
 
-        // 🚀 Envio automático da mensagem pendente
         if (pendingMessage && pendingMessage.to === data.from) {
-          console.log('⚡ Chave recebida! Enviando pendente...');
+          console.log('⚡ Enviando pendente...');
           await sendPendingMessage();
         }
         return;
       }
 
-      // 📤 Pedido de chave
       if (data.type === 'request_key') {
         console.log('📤 Enviando chave para:', data.from);
         const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
@@ -155,7 +121,6 @@ async function connect() {
         return;
       }
 
-      // 📨 Mensagem recebida
       if (data.type === 'message') {
         console.log('📨 Mensagem de:', data.from);
         if (!contactsKeys.has(data.from)) {
@@ -163,107 +128,80 @@ async function connect() {
           const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
           contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
         }
-        
         const contact = contactsKeys.get(data.from);
-        const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
-        
-        if (decrypted) {
-          addMessage(data.from, decrypted, 'received');
-          await LocalDB.save({ 
-            id: Date.now() + '_r', from: data.from, to: myId, 
-            content: decrypted, timestamp: data.timestamp 
-          });
+        if (contact?.aesKey) {
+          const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
+          if (decrypted) {
+            addMessage(data.from, decrypted, 'received');
+            await LocalDB.save({ id: Date.now() + '_r', from: data.from, to: myId, content: decrypted, timestamp: data.timestamp });
+          }
         }
       }
-
       if (data.type === 'error') alert('⚠️ ' + data.content);
-    } catch (err) {
-      console.error('❌ Erro ao processar mensagem:', err);
-    }
+    } catch (err) { console.error('❌ Erro msg:', err); }
   };
 
-  ws.onerror = () => alert('❌ Falha na conexão. Verifique se o backend está online.');
-  ws.onclose = () => alert('🔌 Conexão encerrada. Recarregue.');
+  ws.onerror = () => alert('❌ Falha na conexão.');
+  ws.onclose = () => alert('🔌 Conexão encerrada.');
 }
 
 // ============================================================================
-// 🔔 NOTIFICAÇÕES PUSH (Opcional)
+// PUSH (Opcional)
 // ============================================================================
 async function requestPushPermission() {
-  if (!('Notification' in window)) return alert('Notificações não suportadas.');
+  if (!('Notification' in window)) return alert('Não suportado.');
   const result = await Notification.requestPermission();
-  if (result === 'granted') {
-    await registerPush();
-  } else {
-    alert('⚠️ Permissão negada.');
-  }
+  if (result === 'granted') await registerPush();
 }
 
 async function registerPush() {
   try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in navigator)) {
-      console.warn('Push não suportado'); return;
-    }
-
+    if (!('serviceWorker' in navigator) || !('PushManager' in navigator)) return;
     const reg = await navigator.serviceWorker.ready;
-    const backendHttpUrl = 'https://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL HTTP
+    const backendHttp = 'https://msg-backend-d6zc.onrender.com';
     
-    const res = await fetch(`${backendHttpUrl}/api/vapid-public-key`);
-    if (!res.ok) throw new Error('Falha ao buscar chave VAPID');
-    
+    const res = await fetch(`${backendHttp}/api/vapid-public-key`);
+    if (!res.ok) return;
     const { publicKey } = await res.json();
-    const applicationServerKey = urlBase64ToUint8Array(publicKey);
     
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey
+      applicationServerKey: urlBase64ToUint8Array(publicKey)
     });
 
-    await fetch(`${backendHttpUrl}/api/subscribe`, {
+    await fetch(`${backendHttp}/api/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: myId, subscription })
     });
-
-    console.log('🎉 Push ativado!');
-    const btn = document.getElementById('enable-push-btn');
-    if(btn) { btn.textContent = '✅ Ativo'; btn.disabled = true; }
-
-  } catch (err) {
-    console.error('❌ Erro no Push:', err);
-    // Não alertamos o usuário aqui para não atrapalhar o chat
-  }
+    console.log('🎉 Push ativado');
+  } catch (err) { console.warn('Push falhou:', err); }
 }
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
   const rawData = window.atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  return outputArray;
+  const output = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
+  return output;
 }
 
 // ============================================================================
-// MENSAGENS E UI
+// ENVIO DE MENSAGENS (CORRIGIDO)
 // ============================================================================
 async function sendPendingMessage() {
   if (!pendingMessage) return;
   const { to, content } = pendingMessage;
   pendingMessage = null;
 
-  if (!contactsKeys.has(to)) return;
-
   const contact = contactsKeys.get(to);
+  if (!contact?.aesKey) return; // Segurança extra
+
   const encrypted = await Crypto.encrypt(content, contact.aesKey);
   const myPubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
-
-  ws.send(JSON.stringify({
-    type: 'message', to, content: encrypted, senderPub: myPubB64
-  }));
-
+  ws.send(JSON.stringify({ type: 'message', to, content: encrypted, senderPub: myPubB64 }));
+  
   addMessage('Você', content, 'sent');
   await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
   const input = document.getElementById('message-input');
@@ -271,7 +209,7 @@ async function sendPendingMessage() {
 }
 
 async function sendMessage() {
-  console.log('🔍 Tentando enviar mensagem...');
+  console.log('🔍 Tentando enviar...');
   const toInput = document.getElementById('target-user');
   const contentInput = document.getElementById('message-input');
   
@@ -279,27 +217,25 @@ async function sendMessage() {
   const content = contentInput ? contentInput.value.trim() : '';
   
   if (!to || !content) return alert('Preencha destinatário e mensagem!');
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error('❌ WebSocket não está aberto');
-      return alert('Sem conexão. Recarregue.');
-  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Sem conexão.');
 
-  if (!contactsKeys.has(to)) {
+  // 🔧 CORREÇÃO PRINCIPAL: Verificar contact.aesKey, não apenas contactsKeys.has()
+  const contact = contactsKeys.get(to);
+  if (!contact || !contact.aesKey) {
     pendingMessage = { to, content };
-    console.log('🔑 Chave não encontrada. Solicitando...');
+    console.log('🔑 aesKey ausente para', to, '- solicitando chave...');
     ws.send(JSON.stringify({ type: 'request_key', to }));
 
     const btn = document.getElementById('send-btn');
     if(btn) {
         btn.textContent = '⏳ Aguardando...';
         btn.disabled = true;
-        setTimeout(() => { btn.textContent = 'Enviar'; btn.disabled = false; }, 3000);
+        setTimeout(() => { if(btn) { btn.textContent = 'Enviar'; btn.disabled = false; } }, 3000);
     }
     return;
   }
 
-  console.log(' Criptografando e enviando...');
-  const contact = contactsKeys.get(to);
+  console.log('🔐 Criptografando...');
   const encrypted = await Crypto.encrypt(content, contact.aesKey);
   const myPubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
 
@@ -310,6 +246,9 @@ async function sendMessage() {
   if(contentInput) contentInput.value = '';
 }
 
+// ============================================================================
+// UI HELPERS
+// ============================================================================
 function addMessage(from, text, type) {
   const log = document.getElementById('chat-log');
   if (!log) return;
@@ -337,5 +276,4 @@ async function saveContactsKeys() {
   localStorage.setItem('msg_contacts', JSON.stringify(obj));
 }
 
-// Inicia o app
 init();
