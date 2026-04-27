@@ -1,0 +1,15 @@
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+.app { max-width: 480px; margin: 0 auto; padding: 16px; height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; }
+.hidden { display: none !important; }
+#login-screen { text-align: center; margin-top: 30vh; }
+input { width: 100%; padding: 12px; margin: 6px 0; background: #1e293b; border: 1px solid #334155; color: white; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
+button { width: 100%; padding: 12px; background: #0ea5e9; color: white; border: none; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 16px; margin-top: 8px; }
+button:active { transform: scale(0.98); }
+#chat-log { flex: 1; overflow-y: auto; padding: 8px 0; display: flex; flex-direction: column; gap: 10px; }
+.msg { padding: 10px 14px; border-radius: 14px; max-width: 80%; word-break: break-word; line-height: 1.4; }
+.msg.sent { align-self: flex-end; background: #0ea5e9; color: white; border-bottom-right-radius: 4px; }
+.msg.received { align-self: flex-start; background: #334155; border-bottom-left-radius: 4px; }
+.msg .meta { font-size: 0.7rem; opacity: 0.6; margin-bottom: 3px; }
+.input-area { display: flex; gap: 8px; margin-top: 10px; }
+.input-area input { flex: 1; margin: 0; }
+.input-area button { width: auto; margin: 0; padding: 0 16px; }

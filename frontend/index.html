@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mensageiro Privado</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+  <!-- libsodium para criptografia segura (carrega automaticamente) -->
+  <script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.13/dist/modules/libsodium-wrappers.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <div id="login-screen">
+      <h2>🔐 Entrar</h2>
+      <input type="text" id="username" placeholder="Nome anônimo" maxlength="15">
+      <button id="connect-btn">Conectar</button>
+    </div>
+    <div id="chat-screen" class="hidden">
+      <div id="chat-log"></div>
+      <div class="input-area">
+        <input type="text" id="target-user" placeholder="Nome do contato">
+        <input type="text" id="message-input" placeholder="Mensagem...">
+        <button id="send-btn">Enviar</button>
+      </div>
+      <button id="clear-btn" style="background:#334155; margin-top:8px; font-size:0.8rem;">🗑️ Limpar histórico local</button>
+    </div>
+  </div>
+
+  <script type="module" src="crypto.js"></script>
+  <script type="module" src="localdb.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
