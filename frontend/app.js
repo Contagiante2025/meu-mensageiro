@@ -39,7 +39,7 @@ async function connect() {
   if (!name) return alert('Digite um nome!');
   myId = name;
 
-  const BACKEND_URL = 'wss://SEU_BACKEND_AQUI.onrender.com'; // ⚠️ SUBSTITUA DEPOIS
+  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com'; // ⚠️ SUBSTITUA DEPOIS
   ws = new WebSocket(BACKEND_URL);
 
   ws.onopen = () => {
