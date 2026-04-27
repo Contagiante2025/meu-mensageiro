@@ -24,33 +24,30 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // 2. Roteamento de mensagens e chaves
+      // 2. Roteamento unificado
       if (msg.type === 'message' || msg.type === 'exchange_key' || msg.type === 'request_key') {
         const target = clients.get(msg.to);
         
         if (target && target.ws.readyState === 1) {
-          
-          // Se for mensagem, anexamos a chave pública do remetente
+          // 🔑 CORREÇÃO: Identifica quem está enviando a chave/pedido
+          if (msg.type === 'request_key' || msg.type === 'exchange_key') {
+            msg.from = userId;
+          }
+          // 📨 Para mensagens, anexa a chave pública do remetente
           if (msg.type === 'message') {
             msg.senderPub = clients.get(userId)?.publicKey || 'unknown';
           }
-
-          // CORREÇÃO CRÍTICA: Se for pedido de chave, dizemos QUEM está pedindo
-          if (msg.type === 'request_key') {
-            msg.from = userId; // O servidor identifica o remetente
-          }
-
+          
           target.ws.send(JSON.stringify(msg));
         } else if (msg.type === 'message') {
-          // Usuário alvo offline
           ws.send(JSON.stringify({ 
             type: 'error', 
-            content: 'Usuário offline ou não existe. Peça para ele entrar no chat.' 
+            content: 'Destinatário offline. Peça para ele entrar no chat.' 
           }));
         }
       }
     } catch (e) {
-      console.error('Erro:', e.message);
+      console.error('Erro de roteamento:', e.message);
     }
   });
 
