@@ -1,5 +1,5 @@
-// crypto.js - Criptografia com Web Crypto API nativa (sem dependências)
-// Algoritmo: ECDH (P-256) para troca de chaves + AES-GCM para mensagens
+// crypto.js - Web Crypto API com formato JWK para chaves privadas
+// Algoritmo: ECDH (P-256) + AES-GCM
 
 export const Crypto = {
   // Gera par de chaves ECDH
@@ -11,7 +11,7 @@ export const Crypto = {
     );
   },
 
-  // Exporta chave pública para base64 (para enviar na rede)
+  // Exporta chave pública para base64 (formato raw + base64)
   exportPublicKey: async (key) => {
     const raw = await crypto.subtle.exportKey('raw', key);
     return btoa(String.fromCharCode(...new Uint8Array(raw)));
@@ -27,43 +27,44 @@ export const Crypto = {
     );
   },
 
-  // Exporta chave privada para base64 (para salvar localmente)
+  // Exporta chave privada para JSON string (formato JWK)
   exportPrivateKey: async (key) => {
-    const raw = await crypto.subtle.exportKey('raw', key);
-    return btoa(String.fromCharCode(...new Uint8Array(raw)));
+    const jwk = await crypto.subtle.exportKey('jwk', key);
+    // Remove metadados sensíveis e converte para string
+    const { d, ...publicData } = jwk;
+    return JSON.stringify({ d, ...publicData });
   },
 
-  // Importa chave privada de base64
-  importPrivateKey: async (base64) => {
-    const raw = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  // Importa chave privada de JSON string (formato JWK)
+  importPrivateKey: async (jsonStr) => {
+    const jwk = JSON.parse(jsonStr);
     return await crypto.subtle.importKey(
-      'raw', raw,
+      'jwk', jwk,
       { name: 'ECDH', namedCurve: 'P-256' },
       true, ['deriveKey']
     );
   },
 
-  // Deriva chave AES compartilhada a partir das chaves ECDH
+  // Deriva chave AES compartilhada
   deriveAESKey: async (theirPublic, myPrivate) => {
     return await crypto.subtle.deriveKey(
       { name: 'ECDH', public: theirPublic },
       myPrivate,
       { name: 'AES-GCM', length: 256 },
-      false,  // não exportável (mais seguro)
+      false,
       ['encrypt', 'decrypt']
     );
   },
 
   // Criptografa mensagem com AES-GCM
   encrypt: async (plaintext, aesKey) => {
-    const iv = crypto.getRandomValues(new Uint8Array(12)); // IV de 12 bytes
+    const iv = crypto.getRandomValues(new Uint8Array(12));
     const encoded = new TextEncoder().encode(plaintext);
     const cipher = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv },
       aesKey,
       encoded
     );
-    // Junta IV + ciphertext para enviar
     const result = new Uint8Array(iv.length + cipher.byteLength);
     result.set(iv, 0);
     result.set(new Uint8Array(cipher), iv.length);
