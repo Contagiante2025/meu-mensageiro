@@ -6,6 +6,7 @@
   <title>Mensageiro Privado</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/style.css">
+  <!-- Favicon inline para evitar 404 -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
 </head>
 <body>
@@ -14,7 +15,7 @@
       <h2>🔐 Entrar</h2>
       <input type="text" id="username" placeholder="Nome anônimo" maxlength="15">
       <button id="connect-btn">Conectar</button>
-      <div id="loading" style="display:none; margin-top:10px; color:#94a3b8; font-size:0.9rem;">⏳ Gerando chaves criptográficas...</div>
+      <div id="loading" style="display:none; margin-top:10px; color:#94a3b8; font-size:0.9rem;">⏳ Gerando chaves...</div>
     </div>
     <div id="chat-screen" class="hidden">
       <div id="chat-log"></div>
@@ -27,6 +28,7 @@
     </div>
   </div>
 
+  <!-- Scripts em módulo (carregam após o DOM) -->
   <script type="module" src="/crypto.js"></script>
   <script type="module" src="/localdb.js"></script>
   <script type="module" src="/app.js"></script>
