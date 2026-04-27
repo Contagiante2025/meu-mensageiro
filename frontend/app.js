@@ -3,52 +3,56 @@ import { LocalDB } from '/localdb.js';
 
 let ws;
 let myId = null;
-let myKeys = null;
-let contactsKeys = new Map();
+let myKeys = null; // { publicKey, privateKey }
+let contactsKeys = new Map(); // userId → { publicKey, aesKey }
 
-// Inicialização com tratamento de erro
 async function init() {
   try {
-    // Mostra loading
     document.getElementById('loading').style.display = 'block';
-    
-    // Aguarda libsodium
-    await Crypto.ready();
     
     // Inicia IndexedDB
     await LocalDB.init();
 
-    // Carrega ou gera chaves
+    // Carrega ou gera chaves ECDH
     const stored = localStorage.getItem('msg_keys');
     if (stored) {
-      myKeys = JSON.parse(stored);
-      myKeys.publicKey = Crypto.fromBase64(myKeys.publicKey);
-      myKeys.secretKey = Crypto.fromBase64(myKeys.secretKey);
-      console.log('✅ Chaves carregadas do localStorage');
+      const parsed = JSON.parse(stored);
+      myKeys = {
+        publicKey: await Crypto.importPublicKey(parsed.publicKey),
+        privateKey: await Crypto.importPrivateKey(parsed.privateKey)
+      };
+      console.log('✅ Chaves carregadas');
     } else {
-      myKeys = Crypto.generateKeys();
+      myKeys = await Crypto.generateKeys();
+      // Exporta para salvar no localStorage
+      const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
+      const privB64 = await Crypto.exportPrivateKey(myKeys.privateKey);
       localStorage.setItem('msg_keys', JSON.stringify({
-        publicKey: Crypto.toBase64(myKeys.publicKey),
-        secretKey: Crypto.toBase64(myKeys.secretKey)
+        publicKey: pubB64,
+        privateKey: privB64
       }));
       console.log('✅ Novas chaves geradas');
     }
 
-    // Carrega contatos
+    // Carrega contatos (apenas chaves públicas)
     const storedContacts = localStorage.getItem('msg_contacts');
     if (storedContacts) {
       const parsed = JSON.parse(storedContacts);
-      contactsKeys = new Map(Object.entries(parsed).map(([k, v]) => [k, Crypto.fromBase64(v)]));
+      for (const [userId, pubB64] of Object.entries(parsed)) {
+        contactsKeys.set(userId, {
+          publicKey: await Crypto.importPublicKey(pubB64),
+          aesKey: null // será derivado na primeira mensagem
+        });
+      }
     }
 
-    // Esconde loading e mostra login
     document.getElementById('loading').style.display = 'none';
-    console.log('✅ App inicializado com sucesso');
+    console.log('✅ App inicializado');
     
   } catch (error) {
     console.error('❌ Falha na inicialização:', error);
     document.getElementById('loading').innerHTML = 
-      `❌ Erro: ${error.message}<br><small>Recarregue a página ou verifique sua conexão.</small>`;
+      `❌ Erro: ${error.message}<br><small>Use um navegador moderno (Chrome 90+, Firefox 88+, Safari 15+)</small>`;
   }
 }
 
@@ -56,28 +60,24 @@ async function connect() {
   const name = document.getElementById('username').value.trim().toLowerCase().replace(/\s+/g, '_');
   if (!name) return alert('Digite um nome!');
   
-  // Validação CRÍTICA: myKeys deve existir
   if (!myKeys || !myKeys.publicKey) {
     alert('❌ Erro crítico: Chaves não geradas. Recarregue a página.');
-    console.error('myKeys é null ou inválido:', myKeys);
     return;
   }
   
   myId = name;
-
-  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL DO RENDER
-  console.log('🔌 Conectando a:', BACKEND_URL);
+  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com'; // ⚠️ SUA URL
   
   ws = new WebSocket(BACKEND_URL);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     console.log('✅ WebSocket conectado');
-    console.log('🔑 Enviando chave pública:', Crypto.toBase64(myKeys.publicKey).substring(0, 20) + '...');
+    const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
     
     ws.send(JSON.stringify({
       type: 'register',
       userId: myId,
-      publicKey: Crypto.toBase64(myKeys.publicKey)
+      publicKey: pubB64
     }));
     
     document.getElementById('login-screen').classList.add('hidden');
@@ -91,28 +91,38 @@ async function connect() {
       
       if (data.type === 'exchange_key') {
         console.log('🔑 Chave recebida de:', data.from);
-        contactsKeys.set(data.from, Crypto.fromBase64(data.publicKey));
+        // Deriva chave AES compartilhada
+        const theirPub = await Crypto.importPublicKey(data.publicKey);
+        const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
+        contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
         saveContactsKeys();
         return;
       }
       
       if (data.type === 'request_key') {
         console.log('📤 Enviando chave para:', data.from);
+        const pubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
         ws.send(JSON.stringify({
           type: 'exchange_key',
           to: data.from,
-          publicKey: Crypto.toBase64(myKeys.publicKey)
+          publicKey: pubB64
         }));
         return;
       }
       
       if (data.type === 'message') {
-        console.log('📨 Mensagem recebida de:', data.from);
-        const senderPub = Crypto.fromBase64(data.senderPub);
-        const decrypted = Crypto.decrypt(data.content, senderPub, myKeys.secretKey);
+        console.log('📨 Mensagem recebida');
+        // Deriva chave se ainda não tiver
+        if (!contactsKeys.has(data.from)) {
+          const theirPub = await Crypto.importPublicKey(data.senderPub);
+          const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
+          contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
+        }
+        const contact = contactsKeys.get(data.from);
+        const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
         
         if (decrypted) {
-          console.log('🔓 Mensagem descriptografada com sucesso');
+          console.log('🔓 Mensagem descriptografada');
           addMessage(data.from, decrypted, 'received');
           await LocalDB.save({ 
             id: Date.now() + '_r', 
@@ -121,8 +131,6 @@ async function connect() {
             content: decrypted, 
             timestamp: data.timestamp 
           });
-        } else {
-          console.warn('⚠️ Falha ao descriptografar mensagem');
         }
       }
       
@@ -136,13 +144,10 @@ async function connect() {
 
   ws.onerror = (err) => {
     console.error('❌ WebSocket error:', err);
-    alert('Falha na conexão. Verifique se o backend está online.');
+    alert('Falha na conexão. Verifique o backend.');
   };
   
-  ws.onclose = () => {
-    console.log('🔌 WebSocket fechado');
-    alert('Conexão encerrada. Recarregue a página.');
-  };
+  ws.onclose = () => alert('Conexão encerrada. Recarregue.');
 }
 
 async function sendMessage() {
@@ -150,21 +155,26 @@ async function sendMessage() {
   const content = document.getElementById('message-input').value.trim();
   
   if (!to || !content) return alert('Preencha destinatário e mensagem!');
-  if (!ws || ws.readyState !== 1) return alert('Sem conexão. Recarregue a página.');
+  if (!ws || ws.readyState !== 1) return alert('Sem conexão.');
+  
+  // Garante que temos a chave do contato
   if (!contactsKeys.has(to)) {
     console.log('🔑 Solicitando chave para:', to);
     ws.send(JSON.stringify({ type: 'request_key', to }));
-    return alert(`Solicitando chave para ${to}... Aguarde 2s e tente novamente.`);
+    return alert(`Solicitando chave para ${to}... Aguarde 2s e tente enviar novamente.`);
   }
 
-  const encrypted = Crypto.encrypt(content, contactsKeys.get(to), myKeys.secretKey);
-  console.log('🔐 Mensagem criptografada e enviada');
+  const contact = contactsKeys.get(to);
+  const encrypted = await Crypto.encrypt(content, contact.aesKey);
+  
+  console.log('🔐 Enviando mensagem criptografada');
+  const myPubB64 = await Crypto.exportPublicKey(myKeys.publicKey);
   
   ws.send(JSON.stringify({ 
     type: 'message', 
     to, 
     content: encrypted, 
-    senderPub: Crypto.toBase64(myKeys.publicKey) 
+    senderPub: myPubB64 
   }));
   
   addMessage('Você', content, 'sent');
@@ -179,4 +189,39 @@ async function sendMessage() {
   document.getElementById('message-input').value = '';
 }
 
-function addMessage(from, text, type)
+// Helpers (mantidos iguais)
+function addMessage(from, text, type) {
+  const log = document.getElementById('chat-log');
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+  div.innerHTML = `<div class="meta">${type === 'sent' ? '→' : '←'} ${from} • ${new Date().toLocaleTimeString()}</div>${text}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadHistory() {
+  const history = await LocalDB.load(myId);
+  history.forEach(m => addMessage(m.from === myId ? 'Você' : m.from, m.content, m.from === myId ? 'sent' : 'received'));
+}
+
+async function saveContactsKeys() {
+  const obj = {};
+  for (const [userId, data] of contactsKeys.entries()) {
+    obj[userId] = await Crypto.exportPublicKey(data.publicKey);
+  }
+  localStorage.setItem('msg_contacts', JSON.stringify(obj));
+}
+
+// Event listeners
+document.getElementById('connect-btn').onclick = connect;
+document.getElementById('send-btn').onclick = sendMessage;
+document.getElementById('message-input').onkeydown = e => e.key === 'Enter' && sendMessage();
+document.getElementById('clear-btn').onclick = async () => {
+  if (confirm('Apagar todo o histórico local?')) {
+    await LocalDB.clear();
+    document.getElementById('chat-log').innerHTML = '';
+  }
+};
+
+// Inicia
+init();
