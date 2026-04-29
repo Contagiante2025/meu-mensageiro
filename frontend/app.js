@@ -1,9 +1,9 @@
-// app.js - Mensageiro PWA Completo (E2EE + Push + Moderação + Denúncias)
+// app.js - Mensageiro PWA Completo (E2EE + Push + Moderação + Denúncias + Correções de Conexão)
 import { Crypto } from '/crypto.js';
 import { LocalDB } from '/localdb.js';
 
 // ============================================================================
-//  VARIÁVEIS GLOBAIS
+// 🌐 CONFIGURAÇÕES E VARIÁVEIS GLOBAIS
 // ============================================================================
 let ws = null;
 let myId = null;
@@ -11,12 +11,12 @@ let myKeys = null; // { publicKey, privateKey }
 let contactsKeys = new Map(); // userId → { publicKey, aesKey }
 let pendingMessage = null;
 
-// ⚠️ ATUALIZE SE SUA URL MUDAR
+// ⚠️ URLs DO SEU BACKEND (Render)
 const BACKEND_WS = 'wss://msg-backend-d6zc.onrender.com';
 const BACKEND_HTTP = 'https://msg-backend-d6zc.onrender.com';
 
 // ============================================================================
-// ️ MODERAÇÃO DE CONTEÚDO
+// 🛡️ MODERAÇÃO DE CONTEÚDO
 // ============================================================================
 const BLOCKED_WORDS = {
   hard: ['spam', 'golpe', 'xxx', 'palavrao_grave'], // Bloqueio imediato
@@ -77,11 +77,11 @@ async function reportMessage(msgId, fromUser, timestamp) {
         reason
       })
     });
-    if (res.ok) alert('✅ Denúncia enviada! Obrigado.');
-    else alert('❌ Erro ao enviar denúncia.');
+    if (res.ok) showToast('✅ Denúncia enviada!', 'success');
+    else showToast('❌ Erro ao enviar denúncia.', 'error');
   } catch (err) {
     console.error('Erro ao reportar:', err);
-    alert(' Erro de conexão.');
+    showToast('❌ Erro de conexão ao reportar.', 'error');
   }
 }
 
@@ -118,6 +118,252 @@ function addMessage(from, text, type, timestamp = Date.now()) {
   log.scrollTop = log.scrollHeight;
 }
 
+// ============================================================================
+// 🔔 NOTIFICAÇÕES PUSH (CORRIGIDO)
+// ============================================================================
+async function requestPushPermission() {
+  if (!('Notification' in window)) return showToast('Notificações não suportadas neste navegador.', 'error');
+  
+  const result = await Notification.requestPermission();
+  if (result === 'granted') {
+    await registerPush();
+  } else {
+    showToast('Permissão negada. Você não receberá alertas.', 'warning');
+  }
+}
+
+async function registerPush() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in navigator)) return;
+    
+    // Verifica se é PWA instalado (Android exige para push estável)
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+    if (!isStandalone && Notification.permission === 'granted') {
+      console.warn('⚠️ Para notificações estáveis no Android, instale o app na Tela Inicial.');
+    }
+
+    const reg = await navigator.serviceWorker.ready;
+    console.log('🔄 Buscando chave VAPID...');
+    const res = await fetch(`${BACKEND_HTTP}/api/vapid-public-key`);
+    if (!res.ok) throw new Error('Falha ao buscar chave VAPID');
+    
+    const { publicKey } = await res.json();
+    const applicationServerKey = urlBase64ToUint8Array(publicKey);
+    
+    console.log('🔑 Criando subscription...');
+    const subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey
+    });
+
+    console.log('📤 Registrando subscription no backend...');
+    await fetch(`${BACKEND_HTTP}/api/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: myId, subscription })
+    });
+
+    console.log('🎉 Push ativado!');
+    showToast('🔔 Notificações ativadas!', 'success');
+    const btn = document.getElementById('enable-push-btn');
+    if(btn) { btn.textContent = '✅ Ativas'; btn.disabled = true; btn.style.background = '#22c55e'; }
+  } catch (err) {
+    console.error('❌ Falha no Push:', err);
+    // Não alertamos o usuário aqui para não bloquear o app
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const output = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
+  return output;
+}
+
+// ============================================================================
+// 🔌 CONEXÃO WEBSOCKET (CORRIGIDA)
+// ============================================================================
+async function connect() {
+  const nameInput = document.getElementById('username');
+  const name = nameInput ? nameInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
+  if (!name) return alert('Digite um nome!');
+  if (!myKeys?.publicKey) return alert('❌ Chaves inválidas.');
+
+  myId = name;
+  console.log('🔌 Conectando a:', BACKEND_WS);
+  ws = new WebSocket(BACKEND_WS);
+
+  ws.onopen = async () => {
+    console.log('✅ WebSocket conectado');
+    ws.send(JSON.stringify({ type: 'register', userId: myId, publicKey: await Crypto.exportPublicKey(myKeys.publicKey) }));
+    
+    const login = document.getElementById('login-screen');
+    const chat = document.getElementById('chat-screen');
+    if(login) login.classList.add('hidden');
+    if(chat) chat.classList.remove('hidden');
+    
+    loadHistory();
+    if (Notification.permission === 'granted') registerPush();
+  };
+
+  ws.onmessage = async (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      
+      // 1. Tratamento de Erros do Servidor (Offline / Nome Duplicado)
+      if (data.type === 'error') {
+        console.warn('⚠️ Erro do servidor:', data.content);
+        showToast(data.content, 'error');
+        
+        // Se o erro for nome duplicado, recarrega a página para o usuário tentar outro nome
+        if (data.content.includes('Nome já em uso')) {
+          setTimeout(() => window.location.reload(), 2000);
+        }
+        return;
+      }
+
+      // 2. Banimento
+      if (data.type === 'banned') {
+        alert('🚫 ' + (data.content || 'Sua conta foi banida.'));
+        ws.close();
+        return;
+      }
+
+      // 3. Troca de Chaves
+      if (data.type === 'exchange_key') {
+        const theirPub = await Crypto.importPublicKey(data.publicKey);
+        const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
+        const existing = contactsKeys.get(data.from);
+        if (existing) existing.aesKey = aesKey;
+        else contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
+        saveContactsKeys();
+        
+        if (pendingMessage && pendingMessage.to === data.from) { 
+          console.log('📤 Enviando pendente...'); 
+          await sendPendingMessage(); 
+        }
+        return;
+      }
+
+      // 4. Pedido de Chave
+      if (data.type === 'request_key') {
+        ws.send(JSON.stringify({ type: 'exchange_key', to: data.from, publicKey: await Crypto.exportPublicKey(myKeys.publicKey) }));
+        return;
+      }
+
+      // 5. Mensagem Recebida
+      if (data.type === 'message') {
+        if (!contactsKeys.has(data.from)) {
+          const theirPub = await Crypto.importPublicKey(data.senderPub);
+          contactsKeys.set(data.from, { publicKey: theirPub, aesKey: await Crypto.deriveAESKey(theirPub, myKeys.privateKey) });
+        }
+        const contact = contactsKeys.get(data.from);
+        if (contact?.aesKey) {
+          const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
+          if (decrypted) {
+            addMessage(data.from, decrypted, 'received', data.timestamp);
+            await LocalDB.save({ id: data.timestamp + '_r', from: data.from, to: myId, content: decrypted, timestamp: data.timestamp });
+          }
+        }
+      }
+    } catch (err) { console.error('📥 Erro msg:', err); }
+  };
+
+  ws.onerror = () => showToast('❌ Falha na conexão.', 'error');
+  ws.onclose = () => showToast('🔌 Conexão encerrada. Recarregue.', 'info');
+}
+
+// ============================================================================
+// 📤 ENVIO DE MENSAGENS
+// ============================================================================
+async function sendMessage() {
+  const toInput = document.getElementById('target-user');
+  const contentInput = document.getElementById('message-input');
+  const to = toInput ? toInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
+  const content = contentInput ? contentInput.value.trim() : '';
+  
+  if (!to || !content) return alert('Preencha destinatário e mensagem!');
+  if (!ws || ws.readyState !== WebSocket.OPEN) return showToast('Sem conexão.', 'error');
+
+  const check = checkContent(content);
+  if (check.action === 'block') {
+    return showToast(`❌ ${check.reason}`, 'error');
+  }
+  if (check.action === 'confirm') {
+    return new Promise((resolve) => {
+      showConfirmationModal(
+        `${check.reason}.<br><br>Respeito gera respeito. Deseja mesmo enviar esta mensagem?`,
+        async () => { console.log('✅ Confirmado'); await proceedToSend(to, content, contentInput); resolve(); },
+        () => { console.log('❌ Cancelado'); contentInput?.focus(); resolve(); }
+      );
+    });
+  }
+  await proceedToSend(to, content, contentInput);
+}
+
+async function proceedToSend(to, content, contentInput) {
+  const contact = contactsKeys.get(to);
+  
+  // Se não tem chave, solicita
+  if (!contact || !contact.aesKey) {
+    pendingMessage = { to, content };
+    console.log('🔑 aesKey ausente. Solicitando chave...');
+    ws.send(JSON.stringify({ type: 'request_key', to }));
+    
+    const btn = document.getElementById('send-btn');
+    if(btn) { 
+      btn.textContent = '⏳ Solicitando chave...'; 
+      btn.disabled = true; 
+      setTimeout(() => { if(btn) { btn.textContent = 'Enviar'; btn.disabled = false; } }, 3000); 
+    }
+    return;
+  }
+
+  // Criptografa e envia
+  console.log('🔐 Criptografando...');
+  const encrypted = await Crypto.encrypt(content, contact.aesKey);
+  ws.send(JSON.stringify({ type: 'message', to, content: encrypted, senderPub: await Crypto.exportPublicKey(myKeys.publicKey) }));
+  
+  addMessage('Você', content, 'sent');
+  await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
+  if(contentInput) contentInput.value = '';
+}
+
+async function sendPendingMessage() {
+  if (!pendingMessage) return;
+  const { to, content } = pendingMessage;
+  pendingMessage = null;
+  const contact = contactsKeys.get(to);
+  if (!contact?.aesKey) return;
+  
+  const encrypted = await Crypto.encrypt(content, contact.aesKey);
+  ws.send(JSON.stringify({ type: 'message', to, content: encrypted, senderPub: await Crypto.exportPublicKey(myKeys.publicKey) }));
+  
+  addMessage('Você', content, 'sent');
+  await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
+  const input = document.getElementById('message-input');
+  if(input) input.value = '';
+}
+
+// ============================================================================
+// 🛠️ HELPERS DE UI & DB
+// ============================================================================
+// Função de Toast (Notificação flutuante)
+function showToast(message, type = 'info') {
+  const existing = document.getElementById('toast-msg');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'toast-msg';
+  const color = type === 'error' ? '#ef4444' : type === 'warning' ? '#f59e0b' : type === 'success' ? '#22c55e' : '#3b82f6';
+  toast.style.cssText = `position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:${color};color:white;padding:12px 20px;border-radius:8px;z-index:10000;font-size:0.9rem;box-shadow:0 4px 12px rgba(0,0,0,0.3);animation:fadeIn 0.3s;`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
+
 async function loadHistory() {
   const history = await LocalDB.load(myId);
   history.forEach(m => addMessage(m.from === myId ? 'Você' : m.from, m.content, m.from === myId ? 'sent' : 'received', m.timestamp));
@@ -132,11 +378,13 @@ async function saveContactsKeys() {
 }
 
 // ============================================================================
-// 🔐 INICIALIZAÇÃO
+// 🚀 INICIALIZAÇÃO
 // ============================================================================
 async function init() {
   try {
-    document.getElementById('loading').style.display = 'block';
+    const loading = document.getElementById('loading');
+    if(loading) loading.style.display = 'block';
+    
     await LocalDB.init();
 
     const stored = localStorage.getItem('msg_keys');
@@ -162,10 +410,10 @@ async function init() {
       }
     }
 
-    document.getElementById('loading').style.display = 'none';
+    if(loading) loading.style.display = 'none';
     console.log('✅ App inicializado');
 
-    // Listeners seguros
+    // Event listeners seguros
     const btnConnect = document.getElementById('connect-btn');
     if (btnConnect) btnConnect.onclick = connect;
     const btnSend = document.getElementById('send-btn');
@@ -180,171 +428,9 @@ async function init() {
   } catch (error) {
     console.error('❌ Erro init:', error);
     const loading = document.getElementById('loading');
-    if (loading) loading.innerHTML = `❌ Erro: ${error.message}`;
+    if (loading) loading.innerHTML = ` Erro: ${error.message}`;
   }
 }
 
-// ============================================================================
-// 🔌 WEBSOCKET
-// ============================================================================
-async function connect() {
-  const nameInput = document.getElementById('username');
-  const name = nameInput ? nameInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
-  if (!name) return alert('Digite um nome!');
-  if (!myKeys?.publicKey) return alert('❌ Chaves inválidas.');
-
-  myId = name;
-  console.log('🔌 Conectando a:', BACKEND_WS);
-  ws = new WebSocket(BACKEND_WS);
-
-  ws.onopen = async () => {
-    console.log('✅ WebSocket conectado');
-    ws.send(JSON.stringify({ type: 'register', userId: myId, publicKey: await Crypto.exportPublicKey(myKeys.publicKey) }));
-    const login = document.getElementById('login-screen');
-    const chat = document.getElementById('chat-screen');
-    if(login) login.classList.add('hidden');
-    if(chat) chat.classList.remove('hidden');
-    loadHistory();
-    if (Notification.permission === 'granted') registerPush();
-  };
-
-  ws.onmessage = async (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      if (data.type === 'exchange_key') {
-        const theirPub = await Crypto.importPublicKey(data.publicKey);
-        const aesKey = await Crypto.deriveAESKey(theirPub, myKeys.privateKey);
-        const existing = contactsKeys.get(data.from);
-        if (existing) existing.aesKey = aesKey;
-        else contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
-        saveContactsKeys();
-        if (pendingMessage && pendingMessage.to === data.from) { console.log('📤 Enviando pendente...'); await sendPendingMessage(); }
-        return;
-      }
-      if (data.type === 'request_key') {
-        ws.send(JSON.stringify({ type: 'exchange_key', to: data.from, publicKey: await Crypto.exportPublicKey(myKeys.publicKey) }));
-        return;
-      }
-      if (data.type === 'message') {
-        if (!contactsKeys.has(data.from)) {
-          const theirPub = await Crypto.importPublicKey(data.senderPub);
-          contactsKeys.set(data.from, { publicKey: theirPub, aesKey: await Crypto.deriveAESKey(theirPub, myKeys.privateKey) });
-        }
-        const contact = contactsKeys.get(data.from);
-        if (contact?.aesKey) {
-          const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
-          if (decrypted) {
-            addMessage(data.from, decrypted, 'received', data.timestamp);
-            await LocalDB.save({ id: data.timestamp + '_r', from: data.from, to: myId, content: decrypted, timestamp: data.timestamp });
-          }
-        }
-      }
-      if (data.type === 'banned') {
-        alert('🚫 ' + (data.content || 'Sua conta foi banida.'));
-        ws.close();
-        return;
-      }
-      if (data.type === 'error') alert('⚠️ ' + data.content);
-    } catch (err) { console.error('📥 Erro msg:', err); }
-  };
-
-  ws.onerror = () => alert(' Falha na conexão.');
-  ws.onclose = () => alert('🔌 Conexão encerrada.');
-}
-
-// ============================================================================
-// 🔔 PUSH NOTIFICATIONS
-// ============================================================================
-async function requestPushPermission() {
-  if (!('Notification' in window)) return alert('Não suportado.');
-  const result = await Notification.requestPermission();
-  if (result === 'granted') await registerPush();
-}
-
-async function registerPush() {
-  try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in navigator)) return;
-    const reg = await navigator.serviceWorker.ready;
-    const res = await fetch(`${BACKEND_HTTP}/api/vapid-public-key`);
-    if (!res.ok) return;
-    const { publicKey } = await res.json();
-    const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
-    await fetch(`${BACKEND_HTTP}/api/subscribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: myId, subscription }) });
-    console.log('🎉 Push ativado');
-  } catch (err) { console.warn('Push falhou:', err); }
-}
-
-function urlBase64ToUint8Array(base64String) {
-  const padding = '='.repeat((4 - base64String.length % 4) % 4);
-  const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
-  const rawData = window.atob(base64);
-  const output = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) output[i] = rawData.charCodeAt(i);
-  return output;
-}
-
-// ============================================================================
-//  ENVIO DE MENSAGENS
-// ============================================================================
-async function sendMessage() {
-  const toInput = document.getElementById('target-user');
-  const contentInput = document.getElementById('message-input');
-  const to = toInput ? toInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
-  const content = contentInput ? contentInput.value.trim() : '';
-  
-  if (!to || !content) return alert('Preencha destinatário e mensagem!');
-  if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Sem conexão.');
-
-  const check = checkContent(content);
-  if (check.action === 'block') {
-    return alert(`❌ ${check.reason}.\nEsta mensagem não pode ser enviada.`);
-  }
-  if (check.action === 'confirm') {
-    return new Promise((resolve) => {
-      showConfirmationModal(
-        `${check.reason}.<br><br>Respeito gera respeito. Deseja mesmo enviar esta mensagem?`,
-        async () => { console.log('✅ Confirmado'); await proceedToSend(to, content, contentInput); resolve(); },
-        () => { console.log('❌ Cancelado'); contentInput?.focus(); resolve(); }
-      );
-    });
-  }
-  await proceedToSend(to, content, contentInput);
-}
-
-async function proceedToSend(to, content, contentInput) {
-  const contact = contactsKeys.get(to);
-  if (!contact || !contact.aesKey) {
-    pendingMessage = { to, content };
-    console.log('🔑 aesKey ausente. Solicitando chave...');
-    ws.send(JSON.stringify({ type: 'request_key', to }));
-    const btn = document.getElementById('send-btn');
-    if(btn) { btn.textContent = '⏳ Aguardando...'; btn.disabled = true; setTimeout(() => { if(btn) { btn.textContent = 'Enviar'; btn.disabled = false; } }, 3000); }
-    return;
-  }
-
-  console.log('🔐 Criptografando...');
-  const encrypted = await Crypto.encrypt(content, contact.aesKey);
-  ws.send(JSON.stringify({ type: 'message', to, content: encrypted, senderPub: await Crypto.exportPublicKey(myKeys.publicKey) }));
-  addMessage('Você', content, 'sent');
-  await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
-  if(contentInput) contentInput.value = '';
-}
-
-async function sendPendingMessage() {
-  if (!pendingMessage) return;
-  const { to, content } = pendingMessage;
-  pendingMessage = null;
-  const contact = contactsKeys.get(to);
-  if (!contact?.aesKey) return;
-  const encrypted = await Crypto.encrypt(content, contact.aesKey);
-  ws.send(JSON.stringify({ type: 'message', to, content: encrypted, senderPub: await Crypto.exportPublicKey(myKeys.publicKey) }));
-  addMessage('Você', content, 'sent');
-  await LocalDB.save({ id: Date.now() + '_s', from: myId, to, content, timestamp: Date.now() });
-  const input = document.getElementById('message-input');
-  if(input) input.value = '';
-}
-
-// ============================================================================
-// 🚀 INICIA O APP
-// ============================================================================
+// Inicia o aplicativo
 init();
