@@ -1,21 +1,26 @@
-// app.js - Mensageiro PWA Completo (E2EE + Push + Moderação Inteligente)
+// app.js - Mensageiro PWA Completo (E2EE + Push + Moderação + Denúncias)
 import { Crypto } from '/crypto.js';
 import { LocalDB } from '/localdb.js';
 
+// ============================================================================
+//  VARIÁVEIS GLOBAIS
+// ============================================================================
 let ws = null;
 let myId = null;
 let myKeys = null; // { publicKey, privateKey }
 let contactsKeys = new Map(); // userId → { publicKey, aesKey }
 let pendingMessage = null;
 
+// ⚠️ ATUALIZE SE SUA URL MUDAR
+const BACKEND_WS = 'wss://msg-backend-d6zc.onrender.com';
+const BACKEND_HTTP = 'https://msg-backend-d6zc.onrender.com';
+
 // ============================================================================
-// 🛡️ CONFIGURAÇÃO DE MODERAÇÃO
+// ️ MODERAÇÃO DE CONTEÚDO
 // ============================================================================
 const BLOCKED_WORDS = {
-  // 🔴 Bloqueio rígido (não envia de jeito nenhum)
-  hard: ['spam', 'golpe', 'xxx', 'palavrao_grave'],
-  // 🟡 Alerta suave (pergunta confirmação)
-  soft: ['burro', 'idiota', 'preconceito', 'termo_ofensivo']
+  hard: ['spam', 'golpe', 'xxx', 'palavrao_grave'], // Bloqueio imediato
+  soft: ['burro', 'idiota', 'preconceito', 'termo_ofensivo'] // Confirmação
 };
 
 function checkContent(text) {
@@ -36,14 +41,14 @@ function showConfirmationModal(message, onConfirm, onCancel) {
   if (existing) existing.remove();
   const modal = document.createElement('div');
   modal.id = 'confirm-modal';
-  modal.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 9999; font-family: system-ui, sans-serif;`;
+  modal.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:system-ui,sans-serif;`;
   modal.innerHTML = `
-    <div style="background: #1e293b; color: #e2e8f0; padding: 24px; border-radius: 16px; max-width: 400px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3); border: 1px solid #334155;">
-      <h3 style="margin: 0 0 12px 0; color: #fbbf24; display: flex; align-items: center; gap: 8px;">️ Atenção</h3>
-      <p style="margin: 0 0 20px 0; line-height: 1.5; color: #94a3b8;">${message}</p>
-      <div style="display: flex; gap: 12px; justify-content: flex-end;">
-        <button id="modal-cancel" style="padding: 10px 20px; background: #334155; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500;">Cancelar</button>
-        <button id="modal-confirm" style="padding: 10px 20px; background: #fbbf24; color: #0f172a; border: none; border-radius: 8px; cursor: pointer; font-weight: 600;">Enviar assim mesmo</button>
+    <div style="background:#1e293b;color:#e2e8f0;padding:24px;border-radius:16px;max-width:400px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,0.3);border:1px solid #334155;">
+      <h3 style="margin:0 0 12px 0;color:#fbbf24;display:flex;align-items:center;gap:8px;">⚠️ Atenção</h3>
+      <p style="margin:0 0 20px 0;line-height:1.5;color:#94a3b8;">${message}</p>
+      <div style="display:flex;gap:12px;justify-content:flex-end;">
+        <button id="modal-cancel" style="padding:10px 20px;background:#334155;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:500;">Cancelar</button>
+        <button id="modal-confirm" style="padding:10px 20px;background:#fbbf24;color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-weight:600;">Enviar assim mesmo</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -53,7 +58,81 @@ function showConfirmationModal(message, onConfirm, onCancel) {
 }
 
 // ============================================================================
-// INICIALIZAÇÃO
+// 🚨 SISTEMA DE DENÚNCIAS
+// ============================================================================
+async function reportMessage(msgId, fromUser, timestamp) {
+  if (!confirm(`Reportar mensagem de "${fromUser}" por conteúdo inadequado?`)) return;
+  const reason = prompt('Motivo da denúncia (opcional):', 'Conteúdo ofensivo');
+  if (reason === null) return;
+
+  try {
+    const res = await fetch(`${BACKEND_HTTP}/api/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reporterId: myId,
+        reportedUserId: fromUser,
+        messageId: msgId,
+        timestamp,
+        reason
+      })
+    });
+    if (res.ok) alert('✅ Denúncia enviada! Obrigado.');
+    else alert('❌ Erro ao enviar denúncia.');
+  } catch (err) {
+    console.error('Erro ao reportar:', err);
+    alert(' Erro de conexão.');
+  }
+}
+
+// ============================================================================
+// 🖼️ RENDERIZAÇÃO DE MENSAGENS
+// ============================================================================
+function addMessage(from, text, type, timestamp = Date.now()) {
+  const log = document.getElementById('chat-log');
+  if (!log) return;
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+  const msgId = `msg-${timestamp}-${from}`;
+  div.id = msgId;
+
+  let actionsHtml = '';
+  if (type === 'received') {
+    actionsHtml = `<button class="report-btn" style="background:none;border:none;color:#64748b;cursor:pointer;font-size:0.75rem;margin-left:8px;" title="Reportar">🚫 Reportar</button>`;
+  }
+
+  div.innerHTML = `
+    <div class="meta" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>${type === 'sent' ? '→' : '←'} ${from} • ${new Date(timestamp).toLocaleTimeString()}</span>
+      ${actionsHtml}
+    </div>
+    <div class="content">${text}</div>
+  `;
+
+  if (type === 'received') {
+    const btn = div.querySelector('.report-btn');
+    if (btn) btn.onclick = () => reportMessage(msgId, from, timestamp);
+  }
+
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadHistory() {
+  const history = await LocalDB.load(myId);
+  history.forEach(m => addMessage(m.from === myId ? 'Você' : m.from, m.content, m.from === myId ? 'sent' : 'received', m.timestamp));
+}
+
+async function saveContactsKeys() {
+  const obj = {};
+  for (const [userId, data] of contactsKeys.entries()) {
+    obj[userId] = await Crypto.exportPublicKey(data.publicKey);
+  }
+  localStorage.setItem('msg_contacts', JSON.stringify(obj));
+}
+
+// ============================================================================
+// 🔐 INICIALIZAÇÃO
 // ============================================================================
 async function init() {
   try {
@@ -86,7 +165,7 @@ async function init() {
     document.getElementById('loading').style.display = 'none';
     console.log('✅ App inicializado');
 
-    // Event listeners com proteção contra null
+    // Listeners seguros
     const btnConnect = document.getElementById('connect-btn');
     if (btnConnect) btnConnect.onclick = connect;
     const btnSend = document.getElementById('send-btn');
@@ -106,7 +185,7 @@ async function init() {
 }
 
 // ============================================================================
-// CONEXÃO WEBSOCKET
+// 🔌 WEBSOCKET
 // ============================================================================
 async function connect() {
   const nameInput = document.getElementById('username');
@@ -115,10 +194,8 @@ async function connect() {
   if (!myKeys?.publicKey) return alert('❌ Chaves inválidas.');
 
   myId = name;
-  // ⚠️ ATUALIZE SE SUA URL DO RENDER MUDAR
-  const BACKEND_URL = 'wss://msg-backend-d6zc.onrender.com';
-  console.log('🔌 Conectando a:', BACKEND_URL);
-  ws = new WebSocket(BACKEND_URL);
+  console.log('🔌 Conectando a:', BACKEND_WS);
+  ws = new WebSocket(BACKEND_WS);
 
   ws.onopen = async () => {
     console.log('✅ WebSocket conectado');
@@ -141,7 +218,7 @@ async function connect() {
         if (existing) existing.aesKey = aesKey;
         else contactsKeys.set(data.from, { publicKey: theirPub, aesKey });
         saveContactsKeys();
-        if (pendingMessage && pendingMessage.to === data.from) { console.log(' Enviando pendente...'); await sendPendingMessage(); }
+        if (pendingMessage && pendingMessage.to === data.from) { console.log('📤 Enviando pendente...'); await sendPendingMessage(); }
         return;
       }
       if (data.type === 'request_key') {
@@ -157,21 +234,26 @@ async function connect() {
         if (contact?.aesKey) {
           const decrypted = await Crypto.decrypt(data.content, contact.aesKey);
           if (decrypted) {
-            addMessage(data.from, decrypted, 'received');
-            await LocalDB.save({ id: Date.now() + '_r', from: data.from, to: myId, content: decrypted, timestamp: data.timestamp });
+            addMessage(data.from, decrypted, 'received', data.timestamp);
+            await LocalDB.save({ id: data.timestamp + '_r', from: data.from, to: myId, content: decrypted, timestamp: data.timestamp });
           }
         }
       }
+      if (data.type === 'banned') {
+        alert('🚫 ' + (data.content || 'Sua conta foi banida.'));
+        ws.close();
+        return;
+      }
       if (data.type === 'error') alert('⚠️ ' + data.content);
-    } catch (err) { console.error(' Erro msg:', err); }
+    } catch (err) { console.error('📥 Erro msg:', err); }
   };
 
-  ws.onerror = () => alert('❌ Falha na conexão.');
+  ws.onerror = () => alert(' Falha na conexão.');
   ws.onclose = () => alert('🔌 Conexão encerrada.');
 }
 
 // ============================================================================
-// 🔔 NOTIFICAÇÕES PUSH
+// 🔔 PUSH NOTIFICATIONS
 // ============================================================================
 async function requestPushPermission() {
   if (!('Notification' in window)) return alert('Não suportado.');
@@ -183,13 +265,11 @@ async function registerPush() {
   try {
     if (!('serviceWorker' in navigator) || !('PushManager' in navigator)) return;
     const reg = await navigator.serviceWorker.ready;
-    // ⚠️ ATUALIZE SE SUA URL HTTP DO RENDER MUDAR
-    const backendHttp = 'https://msg-backend-d6zc.onrender.com';
-    const res = await fetch(`${backendHttp}/api/vapid-public-key`);
+    const res = await fetch(`${BACKEND_HTTP}/api/vapid-public-key`);
     if (!res.ok) return;
     const { publicKey } = await res.json();
     const subscription = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
-    await fetch(`${backendHttp}/api/subscribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: myId, subscription }) });
+    await fetch(`${BACKEND_HTTP}/api/subscribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: myId, subscription }) });
     console.log('🎉 Push ativado');
   } catch (err) { console.warn('Push falhou:', err); }
 }
@@ -204,10 +284,9 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 // ============================================================================
-// ENVIO DE MENSAGENS (COM FILTRO)
+//  ENVIO DE MENSAGENS
 // ============================================================================
 async function sendMessage() {
-  console.log('🔍 Tentando enviar...');
   const toInput = document.getElementById('target-user');
   const contentInput = document.getElementById('message-input');
   const to = toInput ? toInput.value.trim().toLowerCase().replace(/\s+/g, '_') : '';
@@ -224,8 +303,8 @@ async function sendMessage() {
     return new Promise((resolve) => {
       showConfirmationModal(
         `${check.reason}.<br><br>Respeito gera respeito. Deseja mesmo enviar esta mensagem?`,
-        async () => { console.log('✅ Confirmado pelo usuário'); await proceedToSend(to, content, contentInput); resolve(); },
-        () => { console.log('❌ Cancelado pelo usuário'); contentInput?.focus(); resolve(); }
+        async () => { console.log('✅ Confirmado'); await proceedToSend(to, content, contentInput); resolve(); },
+        () => { console.log('❌ Cancelado'); contentInput?.focus(); resolve(); }
       );
     });
   }
@@ -266,30 +345,6 @@ async function sendPendingMessage() {
 }
 
 // ============================================================================
-// HELPERS DE UI & DB
+// 🚀 INICIA O APP
 // ============================================================================
-function addMessage(from, text, type) {
-  const log = document.getElementById('chat-log');
-  if (!log) return;
-  const div = document.createElement('div');
-  div.className = `msg ${type}`;
-  div.innerHTML = `<div class="meta">${type === 'sent' ? '→' : '←'} ${from} • ${new Date().toLocaleTimeString()}</div>${text}`;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-
-async function loadHistory() {
-  const history = await LocalDB.load(myId);
-  history.forEach(m => addMessage(m.from === myId ? 'Você' : m.from, m.content, m.from === myId ? 'sent' : 'received'));
-}
-
-async function saveContactsKeys() {
-  const obj = {};
-  for (const [userId, data] of contactsKeys.entries()) {
-    obj[userId] = await Crypto.exportPublicKey(data.publicKey);
-  }
-  localStorage.setItem('msg_contacts', JSON.stringify(obj));
-}
-
-// Inicia o aplicativo
 init();
