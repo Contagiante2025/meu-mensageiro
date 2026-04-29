@@ -10,3 +10,11 @@
     { "src": "https://cdn-icons-png.flaticon.com/512/2906/2906313.png", "sizes": "512x512", "type": "image/png" }
   ]
 }
+{
+  "name": "Painel Admin - Mensageiro",
+  "short_name": "Admin Msg",
+  "start_url": "/admin/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#fbbf24"
+}
